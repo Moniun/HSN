@@ -41,17 +41,22 @@ loss:
   reg_feature_weight: 0.0001
 
 train:
-  ann_batch_size: 16
-  hsn_batch_size: 16
-  epochs_ann: 1
-  epochs_hsn: 20
-  lr: 0.0001
-  weight_decay: 0.0
-  num_workers: 2
-  pin_memory: true
-  persistent_workers: false
-  prefetch_factor: 2
-  amp: false
   out_dir: ./runs/tianmouc_hsn_reproduce
-  device: cuda
-  use_multigpu: true
+
+  epochs_ann: 1
+  epochs_hsn: 10
+
+  ann_batch_size: 64
+  hsn_batch_size: 64
+
+  lr: 0.0001
+  weight_decay: 0.0000
+
+  num_workers: 4
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 2
+
+  amp: true
+
+  hsn_sequential: true
