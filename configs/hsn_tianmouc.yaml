@@ -1,0 +1,57 @@
+project: tianmouc_hsn_reproduce
+seed: 43
+
+data:
+  root: ./data/nfs
+  train_split: train
+  val_split: val
+
+  raw_cop_size: [320, 640]
+  raw_aop_size: [160, 160]
+
+  content_size: [128, 256]
+  padded_size: [232, 296]
+
+  cop_channels: 3
+  aop_channels: 3
+  box_format: xyxy
+  min_box_size: 4
+
+  cop_step: 10
+  dataset_cache_size: 8
+
+model:
+  cop_channels: 3
+  aop_channels: 3
+  feature_channels: 512
+  anchor_stride: 8
+  anchor_scales: [32, 64]
+  anchor_ratios: [0.5, 1.0, 2.0]
+  spike_threshold: 1.0
+  spike_decay: 0.5
+  template_context: 0.25
+
+loss:
+  pos_iou: 0.45
+  neg_iou: 0.20
+  pos_weight: 10.0
+  cls_weight: 1.0
+  reg_weight: 1.0
+  feat_weight: 1.0
+  reg_feature_weight: 0.0001
+
+train:
+  ann_batch_size: 16
+  hsn_batch_size: 16
+  epochs_ann: 1
+  epochs_hsn: 20
+  lr: 0.0001
+  weight_decay: 0.0
+  num_workers: 2
+  pin_memory: true
+  persistent_workers: false
+  prefetch_factor: 2
+  amp: false
+  out_dir: ./runs/tianmouc_hsn_reproduce
+  device: cuda
+  use_multigpu: true
