@@ -98,11 +98,14 @@ def run_epoch(
 
         if is_main_process(dist_info):
             n = max(1, total_batches)
-            pbar.set_postfix({
-                "loss": f"{total_loss / n:.4f}",
-                "cls": f"{total_cls_loss / n:.4f}",
-                "reg": f"{total_reg_loss / n:.4f}",
-            })
+
+            pbar.set_postfix(
+                {
+                    "loss": f"{total_loss / n:.4f}",
+                    "cls": f"{total_cls_loss / n:.4f}",
+                    "reg": f"{total_reg_loss / n:.4f}",
+                }
+            )
 
     num_batches = max(1, total_batches)
 

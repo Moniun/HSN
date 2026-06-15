@@ -333,7 +333,8 @@ def main():
     parser = argparse.ArgumentParser()
     add_common_args(parser)
 
-    parser.add_argument("--checkpoint", required=True)
+    parser.add_argument("--checkpoint", default="runs/tianmouc_hsn_reproduce/hsn_best.pt")
+    parser.add_argument("--split", default="val", choices=["train", "val"])
     parser.add_argument(
         "--mode",
         default="all",
@@ -365,7 +366,7 @@ def main():
     batch_size = cfg["train"].get("hsn_batch_size", 1)
     loader = make_loader(
         cfg,
-        cfg["data"]["val_split"],
+        args.split,
         batch_size,
         False,
     )

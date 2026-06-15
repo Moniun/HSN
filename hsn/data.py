@@ -46,10 +46,12 @@ def _to_boxes_m_t_4(boxes: np.ndarray) -> np.ndarray:
 
 def _valid_box(box: np.ndarray, min_size: float) -> bool:
     box = box.astype(np.float32)
+
     if not np.isfinite(box).all():
         return False
 
     x1, y1, x2, y2 = box.tolist()
+
     return (x2 - x1) >= min_size and (y2 - y1) >= min_size
 
 
@@ -61,7 +63,11 @@ def _resize_pad_img_chw(
     ch, cw = content_size
     ph, pw = padded_size
 
-    img = cv2.resize(img_hwc, (cw, ch), interpolation=cv2.INTER_AREA)
+    img = cv2.resize(
+        img_hwc,
+        (cw, ch),
+        interpolation=cv2.INTER_AREA,
+    )
 
     if img.ndim == 2:
         img = img[..., None]
@@ -79,6 +85,7 @@ def _resize_pad_img_chw(
     canvas[top:top + ch, left:left + cw] = img
 
     chw = np.transpose(canvas, (2, 0, 1))
+
     return torch.from_numpy(chw).float()
 
 
@@ -135,15 +142,13 @@ def _scale_box_to_padded(
 
 class TianmoucHSNDataset(Dataset):
     """
-    mode="ann":
+    mode='ann':
         ANN/COP-only training.
-        Loads only:
-            cop, boxes
+        Only reads cop + boxes.
 
-    mode="hsn":
+    mode='hsn':
         HSN high-frequency training.
-        Loads:
-            cop, td, sd, boxes, boxes_all, cop_indices
+        Reads cop + td + sd + boxes + boxes_all + cop_indices.
     """
 
     def __init__(
@@ -203,11 +208,12 @@ class TianmoucHSNDataset(Dataset):
         self.min_box_size = float(data_cfg.get("min_box_size", 4))
 
         self.fixed_aop_steps = data_cfg.get("fixed_aop_steps", None)
+
         if self.fixed_aop_steps is not None:
             self.fixed_aop_steps = int(self.fixed_aop_steps)
 
         if self.mode == "ann":
-            default_cache_files = 2
+            default_cache_files = int(data_cfg.get("ann_cache_files", 2))
         else:
             default_cache_files = int(data_cfg.get("hsn_cache_files", 0))
 
@@ -288,7 +294,9 @@ class TianmoucHSNDataset(Dataset):
             )
 
         if len(sd) != len(td):
-            raise ValueError(f"sd length {len(sd)} does not match td length {len(td)} in {path}")
+            raise ValueError(
+                f"sd length {len(sd)} does not match td length {len(td)} in {path}"
+            )
 
         if cop_indices.size > 1 and not np.all(np.diff(cop_indices) > 0):
             raise ValueError(f"cop_indices must be strictly increasing in {path}")
@@ -336,12 +344,14 @@ class TianmoucHSNDataset(Dataset):
             template_t = valid_times[0]
 
             for target_t in valid_times[1:]:
-                self.samples.append({
-                    "file_id": file_id,
-                    "obj_id": obj_id,
-                    "template_t": template_t,
-                    "target_t": target_t,
-                })
+                self.samples.append(
+                    {
+                        "file_id": file_id,
+                        "obj_id": obj_id,
+                        "template_t": template_t,
+                        "target_t": target_t,
+                    }
+                )
 
     def _build_hsn_index_for_file(self, file_id: int, path: Path):
         try:
@@ -391,15 +401,17 @@ class TianmoucHSNDataset(Dataset):
                 if not all(_valid_box(b, self.min_box_size) for b in high_boxes):
                     continue
 
-                self.samples.append({
-                    "file_id": file_id,
-                    "obj_id": obj_id,
-                    "template_t": template_t,
-                    "ref_t": ref_t,
-                    "target_t": target_t,
-                    "aop_start": a0,
-                    "aop_end": a1,
-                })
+                self.samples.append(
+                    {
+                        "file_id": file_id,
+                        "obj_id": obj_id,
+                        "template_t": template_t,
+                        "ref_t": ref_t,
+                        "target_t": target_t,
+                        "aop_start": a0,
+                        "aop_end": a1,
+                    }
+                )
 
     def __len__(self):
         return len(self.samples)
@@ -450,11 +462,9 @@ class TianmoucHSNDataset(Dataset):
             "template": template,
             "target": target,
             "search": target,
-
             "template_box": template_box,
             "target_box": target_box,
             "search_box": target_box,
-
             "seq_name": path.stem,
             "obj_id": torch.tensor(obj_id, dtype=torch.long),
             "template_t": torch.tensor(template_t, dtype=torch.long),
@@ -544,29 +554,29 @@ class TianmoucHSNDataset(Dataset):
 
         target_boxes_seq_raw = boxes_all[obj_id, a0:a1]
 
-        target_boxes_seq = torch.stack([
-            _scale_box_to_padded(
-                b,
-                self.raw_cop_size,
-                self.content_size,
-                self.padded_size,
-            )
-            for b in target_boxes_seq_raw
-        ], dim=0)
+        target_boxes_seq = torch.stack(
+            [
+                _scale_box_to_padded(
+                    b,
+                    self.raw_cop_size,
+                    self.content_size,
+                    self.padded_size,
+                )
+                for b in target_boxes_seq_raw
+            ],
+            dim=0,
+        )
 
         return {
             "template": template,
             "ref": ref,
             "target": target,
             "aop": aop,
-
             "template_box": template_box,
             "ref_box": ref_box,
             "target_box": target_box,
             "target_boxes_seq": target_boxes_seq,
-
             "aop_frame_indices": torch.arange(a0, a1, dtype=torch.long),
-
             "seq_name": path.stem,
             "obj_id": torch.tensor(obj_id, dtype=torch.long),
             "template_t": torch.tensor(template_t, dtype=torch.long),

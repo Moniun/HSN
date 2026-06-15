@@ -135,13 +135,15 @@ def train_one_epoch(
         if is_main_process(dist_info):
             n = max(1, total_batches)
 
-            pbar.set_postfix({
-                "loss": f"{total_loss_sum / n:.4f}",
-                "cls": f"{total_cls_sum / n:.4f}",
-                "reg": f"{total_reg_sum / n:.4f}",
-                "feat": f"{total_feat_sum / n:.4f}",
-                "K": K,
-            })
+            pbar.set_postfix(
+                {
+                    "loss": f"{total_loss_sum / n:.4f}",
+                    "cls": f"{total_cls_sum / n:.4f}",
+                    "reg": f"{total_reg_sum / n:.4f}",
+                    "feat": f"{total_feat_sum / n:.4f}",
+                    "K": K,
+                }
+            )
 
     num_batches = max(1, total_batches)
 
@@ -259,7 +261,7 @@ def validate(
 def main():
     parser = argparse.ArgumentParser()
     add_common_args(parser)
-    parser.add_argument("--ann-checkpoint", required=True)
+    parser.add_argument("--ann-checkpoint", default="runs/tianmouc_hsn_reproduce/ann_best.pt")
     args = parser.parse_args()
 
     cfg, device, dist_info = prepare_distributed(args)

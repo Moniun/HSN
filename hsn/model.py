@@ -144,22 +144,13 @@ class TianmoucHSN(nn.Module):
         aop: torch.Tensor,
         target: Optional[torch.Tensor] = None,
     ) -> Dict[str, object]:
-        """
-        Efficient high-frequency HSN forward.
-
-        This version calls SNN only once:
-            snn_feat_seq = self.snn(aop, return_sequence=True)
-
-        Instead of repeatedly forwarding prefixes:
-            self.snn(aop[:, :1])
-            self.snn(aop[:, :2])
-            ...
-        """
         template_feat = self.ann(template)
         ref_feat = self.ann(ref)
 
-        # [B, K, C, Hf, Wf]
-        snn_feat_seq = self.snn(aop, return_sequence=True)
+        snn_feat_seq = self.snn(
+            aop,
+            return_sequence=True,
+        )
 
         cls_seq = []
         reg_seq = []
@@ -232,25 +223,50 @@ class TianmoucHSN(nn.Module):
         reg: torch.Tensor,
         image_hw: Tuple[int, int],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        anchors = self.anchors_for(cls)
+        """
+        Decode single-step anchor cls/reg output.
 
-        cls_f, reg_f = flatten_cls_reg(
-            cls,
-            reg,
-            self.num_anchors,
-        )
+        Args:
+            cls: [B, A*2, Hf, Wf]
+            reg: [B, A*4, Hf, Wf]
+            image_hw: [H, W] of padded input image
 
-        prob = cls_f.softmax(dim=-1)[..., 1]
-        scores, idx = prob.max(dim=1)
+        Returns:
+            boxes:  [B, 4]
+            scores: [B]
+        """
+        anchors = self.anchors_for(cls)  # [N, 4]
+
+        if anchors.ndim == 3:
+            anchors = anchors[0]
+
+        cls_f, reg_f = flatten_cls_reg(cls, reg, self.num_anchors)
+        # cls_f: [B, N, 2]
+        # reg_f: [B, N, 4]
+
+        prob = cls_f.softmax(dim=-1)[..., 1]  # [B, N]
+        scores, idx = prob.max(dim=1)         # [B]
 
         batch_indices = torch.arange(cls.shape[0], device=cls.device)
 
-        deltas = reg_f[batch_indices, idx]
-        boxes_all = decode_boxes(anchors, deltas)
-        boxes = boxes_all[batch_indices, idx]
+        if anchors.shape[0] != reg_f.shape[1]:
+            raise RuntimeError(
+                f"Anchor number mismatch: anchors={anchors.shape}, "
+                f"reg_f={reg_f.shape}. Check AnchorGenerator/grid size."
+            )
+
+        # Correct logic:
+        # select the best anchor for each batch item,
+        # then decode its corresponding delta.
+        selected_anchors = anchors[idx]                    # [B, 4]
+        selected_deltas = reg_f[batch_indices, idx]        # [B, 4]
+
+        boxes = decode_boxes(selected_anchors, selected_deltas)
+
+        if boxes.ndim == 1:
+            boxes = boxes.unsqueeze(0)
 
         h, w = image_hw
-
         boxes[:, [0, 2]] = boxes[:, [0, 2]].clamp(0, w - 1)
         boxes[:, [1, 3]] = boxes[:, [1, 3]].clamp(0, h - 1)
 
@@ -263,6 +279,13 @@ class TianmoucHSN(nn.Module):
         reg_seq: list[torch.Tensor],
         image_hw: Tuple[int, int],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Decode every AOP-step prediction.
+
+        Returns:
+            boxes_seq:  [B, K, 4]
+            scores_seq: [B, K]
+        """
         boxes_all = []
         scores_all = []
 

@@ -18,7 +18,10 @@ data:
   min_box_size: 4
 
   cop_step: 10
-  dataset_cache_size: 8
+  dataset_cache_size: 4
+  
+  ann_cache_files: 8
+  hsn_cache_files: 2
 
 model:
   cop_channels: 3
@@ -43,14 +46,14 @@ loss:
 train:
   out_dir: ./runs/tianmouc_hsn_reproduce
 
-  epochs_ann: 1
+  epochs_ann: 10
   epochs_hsn: 10
 
   ann_batch_size: 64
-  hsn_batch_size: 64
+  hsn_batch_size: 8
 
   lr: 0.0001
-  weight_decay: 0.0000
+  weight_decay: 0.0
 
   num_workers: 4
   pin_memory: true
@@ -59,4 +62,5 @@ train:
 
   amp: true
 
+  ann_sequential: true
   hsn_sequential: true

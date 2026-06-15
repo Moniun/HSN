@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterator, Optional
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -17,10 +18,14 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data import DataLoader, DistributedSampler
+from torch.utils.data import DataLoader, DistributedSampler, Sampler
 
 from hsn.data import TianmoucHSNDataset
 from hsn.utils import ensure_dir, load_config, seed_everything, select_device
+
+import math
+from typing import Iterator
+from torch.utils.data import Sampler
 
 
 @dataclass
@@ -30,6 +35,116 @@ class DistInfo:
     local_rank: int
     world_size: int
 
+
+class ContiguousDistributedSampler(Sampler[int]):
+    """
+    Distributed sampler that assigns contiguous index ranges to each rank.
+
+    This is useful for large .npz sequence files because consecutive samples
+    usually come from the same sequence, reducing repeated random file opens.
+
+    It pads each rank to the same number of samples to avoid DDP hanging.
+    """
+
+    def __init__(
+        self,
+        dataset,
+        num_replicas: Optional[int] = None,
+        rank: Optional[int] = None,
+        drop_last: bool = False,
+    ):
+        if num_replicas is None:
+            num_replicas = dist.get_world_size() if dist.is_initialized() else 1
+        if rank is None:
+            rank = dist.get_rank() if dist.is_initialized() else 0
+
+        self.dataset = dataset
+        self.num_replicas = int(num_replicas)
+        self.rank = int(rank)
+        self.drop_last = bool(drop_last)
+
+        n = len(self.dataset)
+
+        if self.drop_last:
+            self.num_samples = n // self.num_replicas
+        else:
+            self.num_samples = int(math.ceil(n / self.num_replicas))
+
+        self.total_size = self.num_samples * self.num_replicas
+        self.epoch = 0
+
+    def __iter__(self) -> Iterator[int]:
+        n = len(self.dataset)
+
+        start = self.rank * self.num_samples
+        end = min(start + self.num_samples, n)
+
+        indices = list(range(start, end))
+
+        if len(indices) == 0:
+            indices = [0]
+
+        while len(indices) < self.num_samples:
+            indices.append(indices[-1])
+
+        return iter(indices)
+
+    def __len__(self) -> int:
+        return self.num_samples
+
+    def set_epoch(self, epoch: int) -> None:
+        self.epoch = int(epoch)
+
+class ContiguousDistributedSampler(Sampler[int]):
+    """
+    Give each DDP rank a contiguous index range.
+
+    This is more stable for large sequence-based .npz datasets because
+    consecutive samples usually come from the same file.
+    """
+
+    def __init__(self, dataset, num_replicas=None, rank=None, drop_last=False):
+        if num_replicas is None:
+            num_replicas = dist.get_world_size() if dist.is_initialized() else 1
+        if rank is None:
+            rank = dist.get_rank() if dist.is_initialized() else 0
+
+        self.dataset = dataset
+        self.num_replicas = int(num_replicas)
+        self.rank = int(rank)
+        self.drop_last = bool(drop_last)
+
+        n = len(self.dataset)
+
+        if self.drop_last:
+            self.num_samples = n // self.num_replicas
+        else:
+            self.num_samples = int(math.ceil(n / self.num_replicas))
+
+        self.total_size = self.num_samples * self.num_replicas
+        self.epoch = 0
+
+    def __iter__(self) -> Iterator[int]:
+        n = len(self.dataset)
+
+        start = self.rank * self.num_samples
+        end = min(start + self.num_samples, n)
+
+        indices = list(range(start, end))
+
+        if not indices:
+            indices = [0]
+
+        while len(indices) < self.num_samples:
+            indices.append(indices[-1])
+
+        return iter(indices)
+
+    def __len__(self):
+        return self.num_samples
+
+    def set_epoch(self, epoch: int):
+        self.epoch = int(epoch)
 
 def add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--config", default="configs/hsn_tianmouc.yaml")
@@ -76,12 +191,18 @@ def _auto_launch_ddp_if_needed(args) -> None:
     print("[auto-ddp]", " ".join(cmd), flush=True)
 
     code = subprocess.call(cmd, env=env)
+
     raise SystemExit(code)
 
 
 def _setup_distributed() -> DistInfo:
     if "LOCAL_RANK" not in os.environ:
-        return DistInfo(False, rank=0, local_rank=0, world_size=1)
+        return DistInfo(
+            distributed=False,
+            rank=0,
+            local_rank=0,
+            world_size=1,
+        )
 
     local_rank = int(os.environ["LOCAL_RANK"])
     rank = int(os.environ.get("RANK", 0))
@@ -223,17 +344,39 @@ def make_loader(
         else:
             batch_size = int(cfg["train"]["hsn_batch_size"])
 
-    if mode == "hsn" and bool(cfg["train"].get("hsn_sequential", True)):
+    hsn_sequential = bool(cfg["train"].get("hsn_sequential", True))
+
+    if mode == "hsn" and hsn_sequential:
+        shuffle = False
+
+    sampler = None
+
+    ann_sequential = bool(cfg["train"].get("ann_sequential", True))
+    hsn_sequential = bool(cfg["train"].get("hsn_sequential", True))
+
+    if mode == "ann" and ann_sequential:
+        shuffle = False
+
+    if mode == "hsn" and hsn_sequential:
         shuffle = False
 
     sampler = None
 
     if distributed:
-        sampler = DistributedSampler(
-            ds,
-            shuffle=shuffle,
-            drop_last=shuffle,
-        )
+        if (mode == "ann" and ann_sequential) or (mode == "hsn" and hsn_sequential):
+            sampler = ContiguousDistributedSampler(
+                ds,
+                num_replicas=dist.get_world_size(),
+                rank=dist.get_rank(),
+                drop_last=False,
+            )
+        else:
+            sampler = DistributedSampler(
+                ds,
+                shuffle=shuffle,
+                drop_last=shuffle,
+            )
+
         shuffle = False
 
     num_workers = int(cfg["train"].get("num_workers", 0))
@@ -258,8 +401,7 @@ def make_loader(
 
 def set_epoch(loader, epoch: int) -> None:
     sampler = getattr(loader, "sampler", None)
-
-    if isinstance(sampler, DistributedSampler):
+    if hasattr(sampler, "set_epoch"):
         sampler.set_epoch(epoch)
 
 

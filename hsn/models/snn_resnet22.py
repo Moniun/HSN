@@ -77,6 +77,7 @@ class SNNBottleneck(nn.Module):
             nn.Conv2d(mid_ch, out_ch, 1, bias=False),
             nn.BatchNorm2d(out_ch),
         )
+
         self.out_spike = LIFSpike(threshold, decay)
 
         self.downsample = None
@@ -101,16 +102,16 @@ class SNNBottleneck(nn.Module):
 
 class SNNResNet22(nn.Module):
     """
-    Spiking ResNet-22-style AOP branch.
+    SNN where pathway.
 
     Input:
         x_seq: [B, K, C, H, W]
 
     Output:
-        if return_sequence=False:
+        return_sequence=False:
             [B, 512, H/8, W/8]
 
-        if return_sequence=True:
+        return_sequence=True:
             [B, K, 512, H/8, W/8]
     """
 
@@ -123,6 +124,9 @@ class SNNResNet22(nn.Module):
     ):
         super().__init__()
 
+        if readout not in ("last", "mean"):
+            raise ValueError(f"Unsupported readout: {readout}")
+
         self.readout = readout
 
         self.conv1 = SpikingConvBN(
@@ -134,6 +138,7 @@ class SNNResNet22(nn.Module):
             threshold=threshold,
             decay=decay,
         )
+
         self.conv2 = self._make_layer(
             64,
             64,
@@ -142,6 +147,7 @@ class SNNResNet22(nn.Module):
             threshold=threshold,
             decay=decay,
         )
+
         self.conv3 = self._make_layer(
             256,
             128,
@@ -202,7 +208,9 @@ class SNNResNet22(nn.Module):
         return_sequence: bool = False,
     ) -> torch.Tensor:
         if x_seq.ndim != 5:
-            raise ValueError(f"SNN input should be [B,K,C,H,W], got {tuple(x_seq.shape)}")
+            raise ValueError(
+                f"SNN input should be [B,K,C,H,W], got {tuple(x_seq.shape)}"
+            )
 
         self.reset_state()
 
