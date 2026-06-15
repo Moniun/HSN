@@ -45,6 +45,8 @@ def run_epoch(
     total_cls_loss = 0.0
     total_reg_loss = 0.0
     total_batches = 0
+    total_pos = 0.0
+    total_max_iou = 0.0
 
     pbar = tqdm(
         loader,
@@ -66,7 +68,7 @@ def run_epoch(
                     search=batch["target"],
                 )
 
-                loss_cls, loss_reg, _ = loss_fn.cls_reg_loss(
+                loss_cls, loss_reg, stat = loss_fn.cls_reg_loss(
                     out["cls"],
                     out["reg"],
                     batch["target_box"],
@@ -95,6 +97,8 @@ def run_epoch(
         total_cls_loss += float(loss_cls.detach().cpu())
         total_reg_loss += float(loss_reg.detach().cpu())
         total_batches += 1
+        total_pos += float(stat.get("num_pos", 0.0))
+        total_max_iou += float(stat.get("max_iou_mean", 0.0))
 
         if is_main_process(dist_info):
             n = max(1, total_batches)
@@ -104,6 +108,8 @@ def run_epoch(
                     "loss": f"{total_loss / n:.4f}",
                     "cls": f"{total_cls_loss / n:.4f}",
                     "reg": f"{total_reg_loss / n:.4f}",
+                    "pos": f"{total_pos / n:.1f}",
+                    "maxIoU": f"{total_max_iou / n:.3f}"
                 }
             )
 
@@ -113,6 +119,8 @@ def run_epoch(
         "loss": total_loss / num_batches,
         "cls_loss": total_cls_loss / num_batches,
         "reg_loss": total_reg_loss / num_batches,
+        "avg_pos": total_pos / num_batches,
+        "avg_max_iou": total_max_iou / num_batches
     }
 
     for k in list(metrics.keys()):
@@ -235,6 +243,8 @@ def main():
                 f"[ANN] epoch={epoch:03d} | "
                 f"train_loss={train_metrics['loss']:.4f} | "
                 f"val_loss={val_metrics['loss']:.4f} | "
+                f"pos={train_metrics['avg_pos']:.1f} | "
+                f"maxIoU={train_metrics['avg_max_iou']:.3f} | "
                 f"time={elapsed:.2f}s"
             )
 
