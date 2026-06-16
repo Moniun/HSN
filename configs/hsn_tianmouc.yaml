@@ -1,5 +1,4 @@
-project: tianmouc_hsn_reproduce_gn
-seed: 43
+project: tianmouc_hsn
 
 data:
   root: ./data/nfs
@@ -20,7 +19,7 @@ data:
   cop_step: 10
 
   ann_cache_files: 16
-  hsn_cache_files: 2
+  hsn_cache_files: 4
 
 model:
   cop_channels: 3
@@ -33,7 +32,6 @@ model:
 
   spike_threshold: 1.0
   spike_decay: 0.5
-
   template_context: 0.35
 
 loss:
@@ -46,21 +44,21 @@ loss:
   reg_feature_weight: 0.0001
 
   pos_weight: 1.0
-  neg_pos_ratio: 20
-  min_neg: 1024
+  neg_pos_ratio: 10
+  min_neg: 512
 
   reg_beta: 1.0
 
-  rank_weight: 0.7
-  rank_margin: 0.35
-  rank_topk_neg: 256
+  rank_weight: 0.2
+  rank_margin: 0.2
+  rank_topk_neg: 64
+  rank_warmup_epochs: 3
 
 train:
-  out_dir: ./runs/tianmouc_hsn_reproduce
+  out_dir: ./runs/tianmouc_hsn
 
-  # ANN first. Do not train too long; this branch overfits quickly.
-  epochs_ann: 20
-  epochs_hsn: 12
+  epochs_ann: 4
+  epochs_hsn: 20
 
   ann_batch_size: 4
   hsn_batch_size: 4
@@ -78,6 +76,8 @@ train:
 
   amp: true
 
-  # Keep video/file order stable for IO; GroupNorm removes BN running-stat issue.
   ann_sequential: true
   hsn_sequential: true
+
+checkpoint:
+  ann_pretrained: ./runs/tianmouc_hsn/ann_best.pt

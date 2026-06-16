@@ -158,8 +158,9 @@ def train_one_epoch(
     pbar = tqdm(
         loader,
         desc=phase,
-        ncols=140,
+        ncols=100,
         disable=not is_main_process(dist_info),
+        dynamic_ncols=True,
     )
 
     for batch in pbar:
@@ -261,8 +262,9 @@ def validate(
     pbar = tqdm(
         loader,
         desc="val_hsn",
-        ncols=140,
+        ncols=100,
         disable=not is_main_process(dist_info),
+        dynamic_ncols=True,
     )
 
     for batch in pbar:
@@ -316,7 +318,7 @@ def validate(
 def main():
     parser = argparse.ArgumentParser()
     add_common_args(parser)
-    parser.add_argument("--ann-checkpoint", default="runs/tianmouc_hsn_reproduce/ann_best.pt")
+    parser.add_argument("--ann-checkpoint", default="runs/tianmouc_hsn/ann_best.pt")
     parser.add_argument("--freeze-head-epochs", type=int, default=None)
     parser.add_argument("--head-lr", type=float, default=None)
     args = parser.parse_args()
