@@ -7,6 +7,19 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+def norm2d(channels: int, max_groups: int = 32) -> nn.GroupNorm:
+    """
+    GroupNorm has no running mean/var, so train/eval behavior is consistent.
+    This is more stable than BatchNorm for video tracking batches whose distribution
+    changes strongly with sequence/template/search composition.
+    """
+    channels = int(channels)
+    groups = min(int(max_groups), channels)
+    while channels % groups != 0 and groups > 1:
+        groups //= 2
+    return nn.GroupNorm(groups, channels)
+
+
 class HSNTrackingHead(nn.Module):
     """
     Target-aware tracking head.
@@ -21,6 +34,7 @@ class HSNTrackingHead(nn.Module):
         num_anchors: int = 15,
         stride: int = 8,
         template_context: float = 0.35,
+        norm_groups: int = 32,
     ):
         super().__init__()
 
@@ -28,6 +42,7 @@ class HSNTrackingHead(nn.Module):
         self.num_anchors = int(num_anchors)
         self.stride = float(stride)
         self.template_context = float(template_context)
+        self.norm_groups = int(norm_groups)
 
         self.template_proj = nn.Sequential(
             nn.Linear(self.channels, self.channels),
@@ -38,19 +53,19 @@ class HSNTrackingHead(nn.Module):
 
         self.fuse = nn.Sequential(
             nn.Conv2d(self.channels + 1, self.channels, 1, bias=False),
-            nn.BatchNorm2d(self.channels),
+            norm2d(self.channels, self.norm_groups),
             nn.ReLU(inplace=True),
         )
 
         self.conv1 = nn.Sequential(
             nn.Conv2d(self.channels, self.channels, 3, padding=1, bias=False),
-            nn.BatchNorm2d(self.channels),
+            norm2d(self.channels, self.norm_groups),
             nn.ReLU(inplace=True),
         )
 
         self.conv2 = nn.Sequential(
             nn.Conv2d(self.channels, self.channels, 3, padding=1, bias=False),
-            nn.BatchNorm2d(self.channels),
+            norm2d(self.channels, self.norm_groups),
             nn.ReLU(inplace=True),
         )
 
@@ -68,12 +83,20 @@ class HSNTrackingHead(nn.Module):
             elif isinstance(m, nn.Linear):
                 nn.init.normal_(m.weight, std=0.01)
                 nn.init.constant_(m.bias, 0)
-            elif isinstance(m, nn.BatchNorm2d):
+            elif isinstance(m, nn.GroupNorm):
                 nn.init.constant_(m.weight, 1)
                 nn.init.constant_(m.bias, 0)
 
+        # Foreground prior: initial foreground probability ~= 0.01.
+        # This prevents the classifier from starting with high foreground scores
+        # on most background anchors.
         if self.cls.bias is not None:
             nn.init.constant_(self.cls.bias, 0.0)
+            with torch.no_grad():
+                b = self.cls.bias.view(self.num_anchors, 2)
+                b[:, 0] = 0.0       # background logit
+                b[:, 1] = -4.595    # foreground prior ~= 0.01
+
         if self.reg.bias is not None:
             nn.init.constant_(self.reg.bias, 0.0)
 

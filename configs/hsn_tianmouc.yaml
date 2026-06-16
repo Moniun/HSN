@@ -1,4 +1,4 @@
-project: tianmouc_hsn_reproduce
+project: tianmouc_hsn_reproduce_gn
 seed: 43
 
 data:
@@ -16,47 +16,57 @@ data:
   aop_channels: 3
   box_format: xyxy
   min_box_size: 2
+
   cop_step: 10
 
-  ann_cache_files: 8
+  ann_cache_files: 16
   hsn_cache_files: 2
 
 model:
   cop_channels: 3
   aop_channels: 3
   feature_channels: 512
-  anchor_stride: 8
 
+  anchor_stride: 8
   anchor_scales: [8, 16, 32, 64, 96]
   anchor_ratios: [0.5, 1.0, 2.0]
 
   spike_threshold: 1.0
   spike_decay: 0.5
+
   template_context: 0.35
 
 loss:
-  pos_iou: 0.25
-  neg_iou: 0.10
-  pos_weight: 3.0
+  pos_iou: 0.45
+  neg_iou: 0.20
+
   cls_weight: 1.0
-  reg_weight: 2.0
+  reg_weight: 1.0
   feat_weight: 1.0
   reg_feature_weight: 0.0001
-  neg_pos_ratio: 3
-  min_neg: 128
+
+  pos_weight: 1.0
+  neg_pos_ratio: 20
+  min_neg: 1024
+
   reg_beta: 1.0
+
+  rank_weight: 0.7
+  rank_margin: 0.35
+  rank_topk_neg: 256
 
 train:
   out_dir: ./runs/tianmouc_hsn_reproduce
 
+  # ANN first. Do not train too long; this branch overfits quickly.
   epochs_ann: 20
   epochs_hsn: 12
 
   ann_batch_size: 4
   hsn_batch_size: 4
 
-  lr: 0.0001
-  head_lr: 0.0001
+  lr: 0.00001
+  head_lr: 0.00001
   weight_decay: 0.001
 
   freeze_head_epochs: 3
@@ -65,7 +75,9 @@ train:
   pin_memory: true
   persistent_workers: true
   prefetch_factor: 4
+
   amp: true
 
+  # Keep video/file order stable for IO; GroupNorm removes BN running-stat issue.
   ann_sequential: true
   hsn_sequential: true
