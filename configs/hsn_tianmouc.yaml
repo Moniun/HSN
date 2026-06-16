@@ -35,8 +35,8 @@ model:
   template_context: 0.35
 
 loss:
-  pos_iou: 0.45
-  neg_iou: 0.20
+  pos_iou: 0.35
+  neg_iou: 0.15
 
   cls_weight: 1.0
   reg_weight: 1.0
@@ -57,17 +57,17 @@ loss:
 train:
   out_dir: ./runs/tianmouc_hsn
 
-  epochs_ann: 4
+  epochs_ann: 8
   epochs_hsn: 20
 
-  ann_batch_size: 4
-  hsn_batch_size: 4
+  ann_batch_size: 32
+  hsn_batch_size: 8
 
-  lr: 0.00001
-  head_lr: 0.00001
-  weight_decay: 0.001
+  lr: 0.0001
+  head_lr: 0.0001
+  weight_decay: 0.01
 
-  freeze_head_epochs: 3
+  freeze_head_epochs: 0
 
   num_workers: 4
   pin_memory: true
@@ -80,4 +80,4 @@ train:
   hsn_sequential: true
 
 checkpoint:
-  ann_pretrained: ./runs/tianmouc_hsn/ann_best.pt
+  ann_pretrained: ./runs/tianmouc_hsn/ann_last.pt

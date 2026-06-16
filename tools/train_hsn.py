@@ -318,7 +318,7 @@ def validate(
 def main():
     parser = argparse.ArgumentParser()
     add_common_args(parser)
-    parser.add_argument("--ann-checkpoint", default="runs/tianmouc_hsn/ann_best.pt")
+    parser.add_argument("--ann-checkpoint", default="runs/tianmouc_hsn/ann_last.pt")
     parser.add_argument("--freeze-head-epochs", type=int, default=None)
     parser.add_argument("--head-lr", type=float, default=None)
     args = parser.parse_args()
