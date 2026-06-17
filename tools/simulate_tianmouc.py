@@ -27,6 +27,67 @@ def import_official_simulator():
     return run_sim_singleimg
 
 
+def import_official_denoise():
+    try:
+        from tianmoucv.proc.denoise.lvatf import td_adaptive_filter, sd_adaptive_filter
+    except Exception as e:
+        raise ImportError(
+            "Cannot import official TianmouCV LVATF denoise functions:\n"
+            "    from tianmoucv.proc.denoise.lvatf import td_adaptive_filter, sd_adaptive_filter\n\n"
+            "Install/update TianmouCV first:\n"
+            "    pip install -U tianmoucv\n\n"
+            f"Original error: {repr(e)}"
+        )
+    return td_adaptive_filter, sd_adaptive_filter
+
+
+def _denoise_one_channel(
+    x: np.ndarray,
+    filter_fn,
+    device: torch.device,
+    input_scale: float,
+    adapt_th_min: float,
+    adapt_th_max: float,
+    var_fil_ksize: int,
+) -> np.ndarray:
+    # TianmouCV 官方 LVATF 函数处理 torch.Tensor。
+    # 如果 simulator 输出幅值很小，可用 --denoise-input-scale 255 放大后再滤波。
+    x_t = torch.from_numpy(x.astype(np.float32) * float(input_scale)).to(device)
+    with torch.no_grad():
+        y = filter_fn(
+            x_t,
+            min_thr=float(adapt_th_min),
+            max_thr=float(adapt_th_max),
+            kernel_size=int(var_fil_ksize),
+        )
+    y = y.detach().cpu().numpy().astype(np.float32) / float(input_scale)
+    return y
+
+
+def denoise_tsd_lvatf(
+    td: np.ndarray,
+    sd: np.ndarray,
+    td_filter,
+    sd_filter,
+    device: torch.device,
+    input_scale: float = 1.0,
+    adapt_th_min: float = 6.0,
+    adapt_th_max: float = 12.0,
+    var_fil_ksize: int = 3,
+) -> tuple[np.ndarray, np.ndarray]:
+    td_dn = _denoise_one_channel(
+        td, td_filter, device, input_scale, adapt_th_min, adapt_th_max, var_fil_ksize
+    )
+    sd0_dn = _denoise_one_channel(
+        sd[..., 0], sd_filter, device, input_scale, adapt_th_min, adapt_th_max, var_fil_ksize
+    )
+    sd1_dn = _denoise_one_channel(
+        sd[..., 1], sd_filter, device, input_scale, adapt_th_min, adapt_th_max, var_fil_ksize
+    )
+    sd_dn = np.stack([sd0_dn, sd1_dn], axis=-1)
+    return td_dn.astype(np.float16), sd_dn.astype(np.float16)
+
+
 def list_image_files(frames_dir: Path) -> List[Path]:
     files = sorted(
         p for p in frames_dir.iterdir()
@@ -291,14 +352,36 @@ def main():
     parser.add_argument("--sd-prefer", default="sd1", choices=["sd0", "sd1"])
     parser.add_argument("--max-frames", type=int, default=None)
 
+    parser.add_argument("--denoise", action="store_true",
+                        help="Apply official TianmouCV LVATF denoise to TD/SD before saving npz.")
+    parser.add_argument("--denoise-input-scale", type=float, default=1.0,
+                        help="Scale TD/SD before LVATF. If denoised output is too sparse/black, try 255.")
+    parser.add_argument("--adapt-th-min", type=float, default=6.0)
+    parser.add_argument("--adapt-th-max", type=float, default=12.0)
+    parser.add_argument("--var-fil-ksize", type=int, default=3)
+
     args = parser.parse_args()
 
     if args.cop_step < 1:
         raise ValueError("--cop-step must be >= 1")
 
     run_sim_singleimg = import_official_simulator()
+    td_filter = None
+    sd_filter = None
+    if args.denoise:
+        td_filter, sd_filter = import_official_denoise()
+
     print("[official] using tianmoucv.sim.run_sim_singleimg")
     print(f"[config] cop_step={args.cop_step}")
+    print(f"[config] denoise={args.denoise}")
+    if args.denoise:
+        print("[official] denoise=tianmoucv.proc.denoise.lvatf")
+        print(
+            f"[config] LVATF adapt_th_min={args.adapt_th_min}, "
+            f"adapt_th_max={args.adapt_th_max}, "
+            f"var_fil_ksize={args.var_fil_ksize}, "
+            f"input_scale={args.denoise_input_scale}"
+        )
 
     if args.frames_dir:
         frames_bgr, frame_names = read_frames_from_dir(Path(args.frames_dir))
@@ -358,6 +441,19 @@ def main():
         sd = to_sd_two(sd0, sd1, prefer=args.sd_prefer)
         td, sd = resize_aop(td, sd, args.aop_width, args.aop_height)
 
+        if args.denoise:
+            td, sd = denoise_tsd_lvatf(
+                td=td,
+                sd=sd,
+                td_filter=td_filter,
+                sd_filter=sd_filter,
+                device=device,
+                input_scale=args.denoise_input_scale,
+                adapt_th_min=args.adapt_th_min,
+                adapt_th_max=args.adapt_th_max,
+                var_fil_ksize=args.var_fil_ksize,
+            )
+
         td_list.append(td)
         sd_list.append(sd)
 
@@ -400,6 +496,12 @@ def main():
 
         source=np.asarray(str(source)),
         simulator=np.asarray("tianmoucv.sim.run_sim_singleimg"),
+        denoise=np.asarray(bool(args.denoise)),
+        denoise_method=np.asarray("tianmoucv.proc.denoise.lvatf" if args.denoise else "none"),
+        denoise_input_scale=np.asarray(args.denoise_input_scale, dtype=np.float32),
+        adapt_th_min=np.asarray(args.adapt_th_min, dtype=np.float32),
+        adapt_th_max=np.asarray(args.adapt_th_max, dtype=np.float32),
+        var_fil_ksize=np.asarray(args.var_fil_ksize, dtype=np.int32),
         cop_step=np.asarray(args.cop_step, dtype=np.int32),
         sensor_size=np.asarray([args.sensor_height, args.sensor_width], dtype=np.int32),
         aop_size=np.asarray([args.aop_height, args.aop_width], dtype=np.int32),
@@ -414,6 +516,9 @@ def main():
     print(f"  sd          : {sd.shape}, {sd.dtype}")
     print(f"  boxes       : {boxes.shape}, {boxes.dtype}")
     print(f"  cop_indices : {cop_indices.shape}, first={cop_indices[:5]}, step={args.cop_step}")
+    print(f"  denoise     : {args.denoise}")
+    if args.denoise:
+        print(f"  lvatf       : adapt_th_min={args.adapt_th_min}, adapt_th_max={args.adapt_th_max}")
 
 
 if __name__ == "__main__":
