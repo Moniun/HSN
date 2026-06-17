@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import os
 import time
+from typing import Any, Dict, Tuple
 
 import torch
 from torch.cuda.amp import GradScaler, autocast
@@ -27,24 +29,69 @@ from hsn.losses import HSNLoss
 from hsn.model import TianmoucHSN
 
 
-def set_hsn_trainable(core, train_head: bool) -> None:
+def deep_update(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+    """Recursively update a dictionary, returning a new dictionary."""
+    out = copy.deepcopy(base)
+    for k, v in (override or {}).items():
+        if isinstance(v, dict) and isinstance(out.get(k), dict):
+            out[k] = deep_update(out[k], v)
+        else:
+            out[k] = copy.deepcopy(v)
+    return out
+
+
+def apply_stage_config(cfg: Dict[str, Any], stage: str) -> Dict[str, Any]:
     """
-    HSN phase:
-        Always freeze ANN.
-        Always train SNN + feature_hu.
-        Head can be frozen in early epochs, then unfrozen.
+    Backward-compatible stage config.
+
+    Existing code has one global cfg['loss'] and cfg['train']. This function lets you add:
+      ann_loss / ann_train
+      hsn_loss / hsn_train
+    to the same yaml, then applies only the requested stage overrides.
     """
-    set_requires_grad(core.ann, False)
+    cfg = copy.deepcopy(cfg)
+    loss_key = f"{stage}_loss"
+    train_key = f"{stage}_train"
+
+    if loss_key in cfg:
+        cfg["loss"] = deep_update(cfg.get("loss", {}), cfg[loss_key])
+    if train_key in cfg:
+        cfg["train"] = deep_update(cfg.get("train", {}), cfg[train_key])
+
+    cfg["active_stage"] = stage
+    return cfg
+
+
+def set_hsn_trainable(core, cfg, epoch: int) -> bool:
+    """
+    HSN phase: optionally train ANN along with SNN/HU.
+    """
+    freeze_head_epochs = int(cfg["train"].get("freeze_head_epochs", 3))
+    train_head = epoch > freeze_head_epochs
+    
+    train_ann = bool(cfg["train"].get("train_ann", False))
+    freeze_ann_epochs = int(cfg["train"].get("freeze_ann_epochs", 0))
+    train_ann = train_ann and (epoch > freeze_ann_epochs)
+    
+    if train_ann:
+        set_requires_grad(core.ann, True)
+        core.ann.train()
+    else:
+        set_requires_grad(core.ann, False)
+        core.ann.eval()
+    
     set_requires_grad(core.snn, True)
     set_requires_grad(core.feature_hu, True)
     set_requires_grad(core.head, train_head)
-
-    core.ann.eval()
-
+    
+    core.snn.train()
+    core.feature_hu.train()
     if train_head:
         core.head.train()
     else:
         core.head.eval()
+    
+    return train_head, train_ann
 
 
 def compute_hsn_losses(
@@ -52,15 +99,14 @@ def compute_hsn_losses(
     target_boxes_seq: torch.Tensor,
     criterion: HSNLoss,
     cfg,
-) -> tuple[torch.Tensor, Dict[str, float]]:
+) -> Tuple[torch.Tensor, Dict[str, Any]]:
     """
-    Use boxes_all-derived target_boxes_seq to supervise every AOP step.
+    Supervise every AOP step using boxes_all-derived target_boxes_seq.
 
-    Args:
-        out:
-            model output containing cls_seq/reg_seq/pred_feat_seq/target_feat
-        target_boxes_seq:
-            [B, K, 4], from boxes_all at every AOP time step.
+    out keys from model(mode='hsn_sequence'):
+      cls_seq, reg_seq, pred_feat_seq, target_feat
+
+    target_boxes_seq: [B, K, 4]
     """
     cls_seq = out["cls_seq"]
     reg_seq = out["reg_seq"]
@@ -79,22 +125,18 @@ def compute_hsn_losses(
 
     loss_cls_total = 0.0
     loss_reg_total = 0.0
-
     stat_pos = 0.0
     stat_neg = 0.0
     stat_max_iou_sum = 0.0
 
-    # Every AOP step receives task supervision from boxes_all.
     for k in range(K):
         loss_cls_k, loss_reg_k, stat = criterion.cls_reg_loss(
             cls_seq[k],
             reg_seq[k],
             target_boxes_seq[:, k],
         )
-
         loss_cls_total = loss_cls_total + loss_cls_k
         loss_reg_total = loss_reg_total + loss_reg_k
-
         stat_pos += float(stat.get("num_pos", 0.0))
         stat_neg += float(stat.get("num_neg", 0.0))
         stat_max_iou_sum += float(stat.get("max_iou_mean", 0.0))
@@ -102,15 +144,10 @@ def compute_hsn_losses(
     loss_cls = loss_cls_total / K
     loss_reg = loss_reg_total / K
 
-    # Feature distillation is only valid at the target COP unless you also
-    # have teacher RGB/COP features for every intermediate AOP time.
-    loss_feat = criterion.feature_loss(
-        pred_feat_seq[-1],
-        target_feat,
-    )
+    # Only the last AOP step corresponds to the target COP teacher feature.
+    loss_feat = criterion.feature_loss(pred_feat_seq[-1], target_feat)
 
     loss = cls_weight * loss_cls + reg_weight * loss_reg + feat_weight * loss_feat
-
     metrics = {
         "loss": loss,
         "loss_cls": loss_cls,
@@ -121,7 +158,6 @@ def compute_hsn_losses(
         "avg_max_iou": stat_max_iou_sum / K,
         "K": float(K),
     }
-
     return loss, metrics
 
 
@@ -138,10 +174,8 @@ def train_one_epoch(
     freeze_head_epochs: int,
 ):
     model.train()
-
     core = unwrap_model(model)
-    train_head = epoch > freeze_head_epochs
-    set_hsn_trainable(core, train_head=train_head)
+    train_head, train_ann = set_hsn_trainable(core, cfg, epoch)
 
     use_amp = bool(cfg["train"].get("amp", False))
 
@@ -151,21 +185,20 @@ def train_one_epoch(
     total_feat_sum = 0.0
     total_pos_sum = 0.0
     total_iou_sum = 0.0
+    total_k_sum = 0.0
     total_batches = 0
 
     phase = "train_hsn+head" if train_head else "train_hsn_freeze_head"
-
     pbar = tqdm(
         loader,
         desc=phase,
-        ncols=100,
+        ncols=120,
         disable=not is_main_process(dist_info),
         dynamic_ncols=True,
     )
 
     for batch in pbar:
         batch = move_batch_to_device(batch, device)
-
         optimizer.zero_grad(set_to_none=True)
 
         with autocast(enabled=use_amp):
@@ -177,7 +210,6 @@ def train_one_epoch(
                 aop=batch["aop"],
                 target=batch["target"],
             )
-
             loss, metrics = compute_hsn_losses(
                 out=out,
                 target_boxes_seq=batch["target_boxes_seq"],
@@ -202,6 +234,7 @@ def train_one_epoch(
         total_feat_sum += float(metrics["loss_feat"].detach().cpu())
         total_pos_sum += float(metrics["avg_pos"])
         total_iou_sum += float(metrics["avg_max_iou"])
+        total_k_sum += float(metrics["K"])
         total_batches += 1
 
         if is_main_process(dist_info):
@@ -214,12 +247,12 @@ def train_one_epoch(
                     "feat": f"{total_feat_sum / n:.4f}",
                     "pos": f"{total_pos_sum / n:.1f}",
                     "maxIoU": f"{total_iou_sum / n:.3f}",
+                    "K": f"{total_k_sum / n:.1f}",
                     "head": "on" if train_head else "off",
                 }
             )
 
     num_batches = max(1, total_batches)
-
     metrics = {
         "loss": total_loss_sum / num_batches,
         "loss_cls": total_cls_sum / num_batches,
@@ -227,28 +260,18 @@ def train_one_epoch(
         "loss_feat": total_feat_sum / num_batches,
         "avg_pos": total_pos_sum / num_batches,
         "avg_max_iou": total_iou_sum / num_batches,
+        "avg_K": total_k_sum / num_batches,
         "head_trainable": float(train_head),
     }
 
     for k in list(metrics.keys()):
-        metrics[k] = all_reduce_mean(
-            metrics[k],
-            device,
-            dist_info,
-        )
+        metrics[k] = all_reduce_mean(metrics[k], device, dist_info)
 
     return metrics
 
 
 @torch.no_grad()
-def validate(
-    model,
-    loader,
-    criterion,
-    device,
-    cfg,
-    dist_info,
-):
+def validate(model, loader, criterion, device, cfg, dist_info):
     model.eval()
 
     total_loss_sum = 0.0
@@ -257,12 +280,13 @@ def validate(
     total_feat_sum = 0.0
     total_pos_sum = 0.0
     total_iou_sum = 0.0
+    total_k_sum = 0.0
     total_batches = 0
 
     pbar = tqdm(
         loader,
         desc="val_hsn",
-        ncols=100,
+        ncols=120,
         disable=not is_main_process(dist_info),
         dynamic_ncols=True,
     )
@@ -278,7 +302,6 @@ def validate(
             aop=batch["aop"],
             target=batch["target"],
         )
-
         loss, metrics = compute_hsn_losses(
             out=out,
             target_boxes_seq=batch["target_boxes_seq"],
@@ -292,10 +315,10 @@ def validate(
         total_feat_sum += float(metrics["loss_feat"].detach().cpu())
         total_pos_sum += float(metrics["avg_pos"])
         total_iou_sum += float(metrics["avg_max_iou"])
+        total_k_sum += float(metrics["K"])
         total_batches += 1
 
     num_batches = max(1, total_batches)
-
     metrics = {
         "loss": total_loss_sum / num_batches,
         "loss_cls": total_cls_sum / num_batches,
@@ -303,14 +326,11 @@ def validate(
         "loss_feat": total_feat_sum / num_batches,
         "avg_pos": total_pos_sum / num_batches,
         "avg_max_iou": total_iou_sum / num_batches,
+        "avg_K": total_k_sum / num_batches,
     }
 
     for k in list(metrics.keys()):
-        metrics[k] = all_reduce_mean(
-            metrics[k],
-            device,
-            dist_info,
-        )
+        metrics[k] = all_reduce_mean(metrics[k], device, dist_info)
 
     return metrics
 
@@ -318,56 +338,55 @@ def validate(
 def main():
     parser = argparse.ArgumentParser()
     add_common_args(parser)
-    parser.add_argument("--ann-checkpoint", default="runs/tianmouc_hsn/ann_last.pt")
+    parser.add_argument("--ann-checkpoint", default=None)
     parser.add_argument("--freeze-head-epochs", type=int, default=None)
     parser.add_argument("--head-lr", type=float, default=None)
     args = parser.parse_args()
 
     cfg, device, dist_info = prepare_distributed(args)
+    cfg = apply_stage_config(cfg, "hsn")
 
     if args.batch_size is not None:
         cfg["train"]["hsn_batch_size"] = args.batch_size
+
+    ann_checkpoint = (
+        args.ann_checkpoint
+        or cfg.get("checkpoint", {}).get("ann_pretrained")
+        or os.path.join(cfg["train"]["out_dir"], "ann_best.pt")
+    )
 
     freeze_head_epochs = int(
         args.freeze_head_epochs
         if args.freeze_head_epochs is not None
         else cfg["train"].get("freeze_head_epochs", 3)
     )
-
-    base_lr = float(cfg["train"].get("lr", 5e-5))
+    base_lr = float(cfg["train"].get("hsn_lr", cfg["train"].get("lr", 5e-5)))
     head_lr = float(
         args.head_lr
         if args.head_lr is not None
         else cfg["train"].get("head_lr", base_lr * 0.2)
     )
+    ann_lr = float(cfg["train"].get("ann_lr", base_lr * 0.1))
 
     if is_main_process(dist_info):
         print(f"[HSN] distributed={dist_info.distributed}, world_size={dist_info.world_size}")
         print(f"[HSN] device={device}")
         print(f"[HSN] batch_size_per_gpu={cfg['train']['hsn_batch_size']}")
         print(f"[HSN] num_workers_per_process={cfg['train'].get('num_workers', 0)}")
+        print(f"[HSN] out_dir={cfg['train']['out_dir']}")
+        print(f"[HSN] ann_checkpoint={ann_checkpoint}")
         print(f"[HSN] freeze_head_epochs={freeze_head_epochs}")
-        print(f"[HSN] base_lr={base_lr}, head_lr={head_lr}")
+        print(f"[HSN] base_lr={base_lr}, head_lr={head_lr}, ann_lr={ann_lr}")
+        print(f"[HSN] train_ann={cfg['train'].get('train_ann', False)}")
+        print("[HSN] active loss:", cfg["loss"])
 
     model = TianmoucHSN(cfg).to(device)
+    load_checkpoint(model, ann_checkpoint, strict=False, map_location=device)
 
-    load_checkpoint(
-        model,
-        args.ann_checkpoint,
-        strict=False,
-        map_location=device,
-    )
+    # Start with head frozen. Each epoch will re-apply trainability.
+    set_hsn_trainable(model, cfg, epoch=0)
 
-    # Start with head frozen.
-    set_hsn_trainable(model, train_head=False)
-
-    model = wrap_ddp(
-        model,
-        device,
-        dist_info,
-        find_unused_parameters=False,
-    )
-
+    model = wrap_ddp(model, device, dist_info, find_unused_parameters=False)
     core = unwrap_model(model)
 
     train_loader = make_loader(
@@ -379,7 +398,6 @@ def main():
         mode="hsn",
         distributed=dist_info.distributed,
     )
-
     val_loader = make_loader(
         cfg,
         "val",
@@ -390,29 +408,17 @@ def main():
         distributed=dist_info.distributed,
     )
 
-    criterion = HSNLoss(
-        cfg,
-        core.anchor_gen,
-    ).to(device)
+    criterion = HSNLoss(cfg, core.anchor_gen).to(device)
 
     optimizer = torch.optim.Adam(
         [
-            {
-                "params": core.snn.parameters(),
-                "lr": base_lr,
-            },
-            {
-                "params": core.feature_hu.parameters(),
-                "lr": base_lr,
-            },
-            {
-                "params": core.head.parameters(),
-                "lr": head_lr,
-            },
+            {"params": core.ann.parameters(), "lr": ann_lr},
+            {"params": core.snn.parameters(), "lr": base_lr},
+            {"params": core.feature_hu.parameters(), "lr": base_lr},
+            {"params": core.head.parameters(), "lr": head_lr},
         ],
-        weight_decay=float(cfg["train"].get("weight_decay", 1e-4)),
+        weight_decay=float(cfg["train"].get("weight_decay", 0.0)),
     )
-
     scaler = GradScaler(enabled=bool(cfg["train"].get("amp", False)))
 
     epochs = int(
@@ -423,10 +429,8 @@ def main():
     )
 
     best_val = float("inf")
-
     for epoch in range(1, epochs + 1):
         set_epoch(train_loader, epoch)
-
         start_time = time.time()
 
         train_metrics = train_one_epoch(
@@ -441,7 +445,6 @@ def main():
             epoch=epoch,
             freeze_head_epochs=freeze_head_epochs,
         )
-
         val_metrics = validate(
             model=model,
             loader=val_loader,
@@ -453,7 +456,6 @@ def main():
 
         if is_main_process(dist_info):
             elapsed = time.time() - start_time
-
             print(
                 f"[HSN] epoch={epoch:03d} | "
                 f"train_loss={train_metrics['loss']:.4f} | "
@@ -462,12 +464,14 @@ def main():
                 f"val_pos={val_metrics['avg_pos']:.1f} | "
                 f"train_maxIoU={train_metrics['avg_max_iou']:.3f} | "
                 f"val_maxIoU={val_metrics['avg_max_iou']:.3f} | "
+                f"train_K={train_metrics['avg_K']:.1f} | "
+                f"val_K={val_metrics['avg_K']:.1f} | "
                 f"head={'on' if train_metrics['head_trainable'] > 0.5 else 'off'} | "
                 f"time={elapsed:.2f}s"
             )
 
             out_dir = cfg["train"]["out_dir"]
-
+            os.makedirs(out_dir, exist_ok=True)
             save_checkpoint(
                 os.path.join(out_dir, "hsn_last.pt"),
                 model,
@@ -478,7 +482,6 @@ def main():
 
             if val_metrics["loss"] < best_val:
                 best_val = val_metrics["loss"]
-
                 save_checkpoint(
                     os.path.join(out_dir, "hsn_best.pt"),
                     model,
@@ -486,7 +489,6 @@ def main():
                     epoch,
                     {"train": train_metrics, "val": val_metrics},
                 )
-
                 print(f"[best] val_loss={best_val:.6f}")
 
     cleanup_distributed()

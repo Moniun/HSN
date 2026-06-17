@@ -1,6 +1,8 @@
 project: tianmouc_hsn
+seed: 43
 
 data:
+  # 如果你已经重新生成去噪数据，用 ./data/nfs_denoised；否则改回 ./data/nfs
   root: ./data/nfs
   train_split: train
   val_split: val
@@ -27,6 +29,7 @@ model:
   feature_channels: 512
 
   anchor_stride: 8
+  # 这组在你当前数据上 maxIoU 能到约 0.58/0.60，比 6 anchors 更适配 Tianmouc/NfS 尺度
   anchor_scales: [8, 16, 32, 64, 96]
   anchor_ratios: [0.5, 1.0, 2.0]
 
@@ -34,38 +37,78 @@ model:
   spike_decay: 0.5
   template_context: 0.35
 
+# 默认 loss：保底值。实际 ANN/HSN 会分别被 ann_loss/hsn_loss 覆盖。
 loss:
+  pos_iou: 0.45
+  neg_iou: 0.20
+  cls_weight: 1.0
+  reg_weight: 1.0
+  feat_weight: 1.0
+  reg_feature_weight: 0.0001
+  pos_weight: 1.0
+  neg_pos_ratio: 3
+  min_neg: 128
+  reg_beta: 1.0
+  rank_weight: 0.0
+  rank_margin: 0.0
+  rank_topk_neg: 0
+
+# ANN 阶段：目标是稳定训练 COP/what pathway 和 task head。
+# 不要用 HSN 的宽松阈值，否则 pos 会到 2000+，分类头很容易过拟合。
+ann_loss:
   pos_iou: 0.35
-  neg_iou: 0.15
+  neg_iou: 0.20
+
+  pos_weight: 1.0
+  neg_pos_ratio: 3
+  min_neg: 128
+
+  rank_weight: 0.0
+  rank_margin: 0.0
+  rank_topk_neg: 64
+  rank_warmup_epochs: 3
 
   cls_weight: 1.0
   reg_weight: 1.0
   feat_weight: 1.0
   reg_feature_weight: 0.0001
 
-  pos_weight: 1.0
-  neg_pos_ratio: 10
-  min_neg: 512
-
   reg_beta: 1.0
+
+# HSN 阶段：AOP boxes_all 每个 step 都监督，正样本本来偏少，所以阈值适当放宽。
+hsn_loss:
+  pos_iou: 0.35
+  neg_iou: 0.15
+
+  pos_weight: 3.0
+  neg_pos_ratio: 5
+  min_neg: 512
 
   rank_weight: 0.2
   rank_margin: 0.2
   rank_topk_neg: 64
   rank_warmup_epochs: 3
 
+  cls_weight: 1.0
+  reg_weight: 1.0
+  feat_weight: 1.0
+  reg_feature_weight: 0.0001
+
+  reg_beta: 1.0
+
+# 公共 train 配置。实际 ANN/HSN 会分别被 ann_train/hsn_train 覆盖。
 train:
   out_dir: ./runs/tianmouc_hsn
 
-  epochs_ann: 8
-  epochs_hsn: 20
+  epochs_ann: 5
+  epochs_hsn: 12
 
   ann_batch_size: 32
-  hsn_batch_size: 8
+  hsn_batch_size: 4
 
-  lr: 0.0001
-  head_lr: 0.0001
-  weight_decay: 0.01
+  lr: 0.00005
+  head_lr: 0.00001
+  weight_decay: 0.001
 
   freeze_head_epochs: 0
 
@@ -73,11 +116,32 @@ train:
   pin_memory: true
   persistent_workers: true
   prefetch_factor: 4
-
   amp: true
 
   ann_sequential: true
   hsn_sequential: true
 
+# ANN 专用训练参数
+ann_train:
+  out_dir: ./runs/tianmouc_hsn
+  epochs_ann: 8
+  ann_batch_size: 32
+  lr: 0.00003
+  weight_decay: 0.01
+
+# HSN 专用训练参数
+hsn_train:
+  out_dir: ./runs/tianmouc_hsn
+  epochs_hsn: 15
+  hsn_batch_size: 4
+  lr: 0.0001
+  head_lr: 0.0001
+  weight_decay: 0.0001
+  freeze_head_epochs: 3
+  
+  train_ann: true
+  freeze_ann_epochs: 3
+  ann_lr: 0.0001
+
 checkpoint:
-  ann_pretrained: ./runs/tianmouc_hsn/ann_last.pt
+  ann_pretrained: ./runs/tianmouc_hsn/ann_best.pt
